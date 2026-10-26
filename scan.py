@@ -68,6 +68,38 @@ def find_document_contour(edges):
             return approx
     return None
 
+def find_by_brightness(blur, min_area_ratio=0.15):
+    """Fallback: find the page as a big bright (or dark) region instead of using edges."""
+    h, w = blur.shape
+    total = h * w
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    best, best_area = None, 0
+ 
+    for flag in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
+        _, mask = cv2.threshold(blur, 0, 255, flag + cv2.THRESH_OTSU)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+ 
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < min_area_ratio * total or area > 0.98 * total or area <= best_area:
+                continue
+            peri = cv2.arcLength(c, True)
+            candidate = None
+            for eps in (0.02, 0.03, 0.04, 0.05):
+                approx = cv2.approxPolyDP(c, eps * peri, True)
+                if len(approx) == 4 and cv2.isContourConvex(approx):
+                    candidate = approx
+                    break
+            if candidate is None:
+                # use the tightest rotated rectangle, only if the shape is already close to a rectangle
+                box = cv2.boxPoints(cv2.minAreaRect(c))
+                if area / cv2.contourArea(box.astype(np.float32)) >= 0.85:
+                    candidate = box.astype(np.int32).reshape(4, 1, 2)
+            if candidate is not None:
+                best, best_area = candidate, area
+    return best
+
 def scan_document(img, mode="bw", debug_dir=None, hdr=False ):
     """full pipeline to scan a document form an image. Return the scanned image or None if no page is found."""
     small, ratio = tk.resize_to_height(img, DETECT_HEIGHT)
@@ -78,12 +110,26 @@ def scan_document(img, mode="bw", debug_dir=None, hdr=False ):
 
     gray =tk.to_gray(color)
     blur =tk.blur_gaussian(gray, 5)
-    edges = tk.detect_edges(blur, 75, 200)
+
+    #try the normal edge settings first, then mire sensitive ones.
+    corners = None
+    for low, high in ((75, 200), (50, 150), (30, 100)):
+        edges = tk.detect_edges(blur, low, high)
+        corners = find_document_contour(edges)
+        if corners is not None:
+            break
+
+    # Last resort: look for a big brigh/dark rectangle instead of edges.
+    if corners is None:
+        corners = find_by_brightness(blur)
+        if corners is None:
+            return None
 
     corners = find_document_contour(edges)
     if corners is None:
         return None
 
+    #scale corners back to the original image size, then wrap the full-res image.
     corners = corners.reshape(4,2) / ratio
     wraped = four_point_transform(img, corners)
 
@@ -102,8 +148,6 @@ def scan_document(img, mode="bw", debug_dir=None, hdr=False ):
         cv2.drawContours(outline, [(corners * ratio).astype(int).reshape(4,1,2)], -1,(0, 255,0),2)
         cv2.imwrite(os.path.join(debug_dir, "1_gray.png"), gray),
         cv2.imwrite(os.path.join(debug_dir, "2_blur.png"), blur),
-        cv2.imwrite(os.path.join(debug_dir, "3_color.png"), color),
-        cv2.imwrite(os.path.join(debug_dir, "4_hdr.png"), color),
         cv2.imwrite(os.path.join(debug_dir, "5_edges.png"), edges),
         cv2.imwrite(os.path.join(debug_dir, "6_outline.png"), outline),
         cv2.imwrite(os.path.join(debug_dir, "7_warped.png"), wraped)
@@ -127,6 +171,7 @@ def main():
         except FileNotFoundError as err:
             print(err)
             sys.exit(1)
+            
         debug_dir = os.path.splitext(args.output)[0] + "_steps" if args.debug else None
         result = scan_document(img, args.mode, debug_dir, args.hdr)
         
