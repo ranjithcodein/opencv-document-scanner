@@ -1,0 +1,16 @@
+# virtual environment
+.venv/
+venv/
+ 
+# Python cache
+__pycache__/
+*.pyc
+ 
+# your raw photos and generated steps (keep only chosen samples in samples/)
+image_files/
+ 
+# editor / OS files
+.vscode/
+.DS_Store
+Thumbs.db
+ 
